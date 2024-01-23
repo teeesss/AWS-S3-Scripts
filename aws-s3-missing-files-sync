@@ -1,0 +1,74 @@
+#!/bin/bash
+
+# Get a list of all S3 buckets
+buckets=$(aws s3 ls | awk '{print $3}')
+
+# Buckets to ignore (updated as needed)
+ignore_keywords=("logs" "cloudtrail" "cloudwatch" "sagemaker")
+
+# Filter out buckets with specified keywords
+filtered_buckets=()
+for bucket in $buckets
+do
+  ignore=false
+  for keyword in "${ignore_keywords[@]}"
+  do
+    if [[ $bucket == *"$keyword"* ]]; then
+      ignore=true
+      break
+    fi
+  done
+
+  if [ "$ignore" = false ]; then
+    filtered_buckets+=("$bucket")
+  fi
+done
+
+# Prompt for buckets to check
+echo "List of available buckets:"
+select bucket in "${filtered_buckets[@]}" "All"
+do
+  case $bucket in
+    "All")
+      selected_buckets=("${filtered_buckets[@]}")
+      break
+      ;;
+    *)
+      IFS=', ' read -r -a bucket_numbers <<< "$bucket"
+      selected_buckets=()
+      for number in "${bucket_numbers[@]}"
+      do
+        selected_buckets+=("${filtered_buckets[number-1]}")
+      done
+      break
+      ;;
+  esac
+done
+
+# If no number is entered, default to checking all buckets
+if [ -z "$bucket" ]; then
+  selected_buckets=("${filtered_buckets[@]}")
+fi
+
+# Iterate over selected buckets
+for selected_bucket in "${selected_buckets[@]}"
+do
+  echo "Checking bucket: $selected_bucket"
+
+  # Perform a dry-run sync and output missing files to a temporary file
+  aws s3 sync "s3://$selected_bucket" "$selected_bucket" --dryrun >> temp_missing_files.txt
+
+  # Add a separator for better readability
+  echo "---------------------------------" >> temp_missing_files.txt
+done
+
+# Concatenate the temporary files into the final output file
+for file in temp_missing_files*.txt
+do
+  cat "$file" >> missing_files.txt
+done
+
+# Remove temporary files
+rm temp_missing_files*.txt
+
+echo "Script completed. Check missing_files.txt for results."
