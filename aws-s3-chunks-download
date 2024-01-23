@@ -1,0 +1,79 @@
+# Download large files from S3 into smaller chunks with resume functionality
+# User prompted for bucket name and key/file/object name
+# Default chunk size is 50 MB
+
+#!/bin/bash
+
+set -euo pipefail  # Enable strict error handling
+
+# Gather input
+read -p "Enter the S3 bucket name: " bucket
+read -p "Enter the S3 object key (file name): " key
+
+default_chunk_size_mb=50  # 50 MB
+default_chunk_size_formatted=$(numfmt --to=iec-i --suffix=B --format="%1.0f" $((default_chunk_size_mb * 1024 * 1024)))
+read -p "Enter the chunk size in MB (default is ${default_chunk_size_mb}MB): " chunk_size_input
+chunk_size_input=${chunk_size_input:-${default_chunk_size_mb}}
+
+# Function to convert human-readable sizes to bytes
+function convert_to_bytes() {
+    local input=$1
+    echo "$((input * 1024 * 1024))"
+}
+
+chunk_size=$(convert_to_bytes $chunk_size_input)
+
+# Check if the chunk size is a valid number
+if ! [[ $chunk_size =~ ^[0-9]+$ ]]; then
+    echo "Invalid chunk size. Please enter a valid size in MB."
+    exit 1
+fi
+
+# Extract the directory name from the key
+local_directory="${bucket}"
+mkdir -p "${local_directory}"
+
+file_size=$(aws s3api head-object --bucket $bucket --key $key --query ContentLength)
+file_size=${file_size%.*}  # Remove decimal part, if any
+
+num_chunks=$((file_size / chunk_size))
+remaining_bytes=$((file_size % chunk_size))
+
+echo "Estimated number of total chunks/files: $((num_chunks + (remaining_bytes > 0 ? 1 : 0)))"
+
+# Download the file in chunks
+for ((i=0; i<num_chunks; i++)); do
+    start_byte=$((i * chunk_size))
+    end_byte=$((start_byte + chunk_size - 1))
+    aws s3api get-object --bucket $bucket --key $key --range bytes=$start_byte-$end_byte "${local_directory}/large_file_part_$((i+1))"
+done
+
+# Download the remaining bytes
+if [ $remaining_bytes -gt 0 ]; then
+    start_byte=$((num_chunks * chunk_size))
+    end_byte=$((start_byte + remaining_bytes - 1))
+    aws s3api get-object --bucket $bucket --key $key --range bytes=$start_byte-$end_byte "${local_directory}/large_file_part_$((num_chunks+1))"
+fi
+
+# Concatenate the chunks into the original file
+cat "${local_directory}/large_file_part_"* > "${local_directory}/$key"
+
+# ********* BEGIN CODE SNIPPET *********
+# Concatenation completed, now compute and compare MD5 checksums
+downloaded_md5=$(md5sum "${local_directory}/$key" | awk '{print $1}')
+
+# Prompt for file comparison
+read -p "Enter the path to the file for comparison: " comparison_file
+comparison_md5=$(md5sum "$comparison_file" | awk '{print $1}')
+
+if [ "$downloaded_md5" == "$comparison_md5" ]; then
+  echo "Checksum verification passed. Downloaded file matches the provided file."
+else
+  echo "Checksum verification failed. Downloaded file differs from the provided file."
+fi
+# ********* END CODE SNIPPET *********
+
+# Clean up the downloaded parts
+rm "${local_directory}/large_file_part_"*
+
+echo "Download completed successfully! The file is saved in the local directory: ${local_directory}/$key"
